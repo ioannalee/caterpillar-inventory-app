@@ -331,7 +331,7 @@ st.write("This simulation uses the selected item's historical weekly demand patt
 
 sim_history = part_history.tail(sim_weeks).copy()
 
-inventory = float(starting_inventory)
+on_hand_inventory = float(starting_inventory)
 lead_time = DOMESTIC_LEAD_TIME_WEEKS
 open_orders = []
 sim_rows = []
@@ -343,9 +343,11 @@ if selected_segment in ["AX", "AY"]:
     for i, (_, row) in enumerate(sim_history.iterrows()):
         demand = float(row["weekly_demand"])
 
+        # Beginning inventory is carried over from previous week's ending inventory
+        beginning_inventory = on_hand_inventory
+
         # Receive incoming orders this week
         receipts = sum(qty for arrival_week, qty in open_orders if arrival_week == i)
-        inventory += receipts
 
         # Remove received orders from pipeline
         open_orders = [
@@ -354,28 +356,31 @@ if selected_segment in ["AX", "AY"]:
             if arrival_week != i
         ]
 
-        beginning_inventory = inventory
+        # Inventory available after receipts arrive
+        available_inventory = beginning_inventory + receipts
 
         # Demand occurs
-        inventory -= demand
+        ending_inventory = available_inventory - demand
 
-        # Ending inventory after demand
-        ending_inventory = inventory
+        # Inventory position = ending on-hand inventory + open orders still in pipeline
+        inventory_position = ending_inventory + sum(qty for _, qty in open_orders)
 
-        # Continuous review: place fixed EOQ when ending inventory <= ROP
-        order_triggered = ending_inventory <= reorder_point
-        order_qty = fixed_order_qty if order_triggered else 0.0
-
-        if order_qty > 0:
+        # Continuous review: trigger fixed EOQ order based on inventory position
+        order_qty = 0.0
+        if inventory_position <= reorder_point:
+            order_qty = fixed_order_qty
             arrival_week = i + lead_time
             open_orders.append((arrival_week, order_qty))
+            inventory_position = ending_inventory + sum(qty for _, qty in open_orders)
 
-        inventory_position = ending_inventory + sum(qty for _, qty in open_orders)
+        # Carry ending inventory into next week
+        on_hand_inventory = ending_inventory
 
         sim_rows.append({
             "week_start": row["week_start"],
             "beginning_inventory": beginning_inventory,
             "receipts": receipts,
+            "available_inventory": available_inventory,
             "demand": demand,
             "ending_inventory": ending_inventory,
             "inventory_position": inventory_position,
@@ -390,9 +395,11 @@ else:
     for i, (_, row) in enumerate(sim_history.iterrows()):
         demand = float(row["weekly_demand"])
 
+        # Beginning inventory is carried over from previous week's ending inventory
+        beginning_inventory = on_hand_inventory
+
         # Receive incoming orders this week
         receipts = sum(qty for arrival_week, qty in open_orders if arrival_week == i)
-        inventory += receipts
 
         # Remove received orders from pipeline
         open_orders = [
@@ -401,12 +408,13 @@ else:
             if arrival_week != i
         ]
 
-        beginning_inventory = inventory
+        # Inventory available after receipts arrive
+        available_inventory = beginning_inventory + receipts
 
         # Demand occurs
-        inventory -= demand
+        ending_inventory = available_inventory - demand
 
-        ending_inventory = inventory
+        # Inventory position = ending on-hand inventory + open orders still in pipeline
         inventory_position = ending_inventory + sum(qty for _, qty in open_orders)
 
         # Periodic review: only review every R weeks
@@ -419,10 +427,14 @@ else:
             open_orders.append((arrival_week, order_qty))
             inventory_position = ending_inventory + sum(qty for _, qty in open_orders)
 
+        # Carry ending inventory into next week
+        on_hand_inventory = ending_inventory
+
         sim_rows.append({
             "week_start": row["week_start"],
             "beginning_inventory": beginning_inventory,
             "receipts": receipts,
+            "available_inventory": available_inventory,
             "demand": demand,
             "ending_inventory": ending_inventory,
             "inventory_position": inventory_position,
