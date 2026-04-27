@@ -336,6 +336,8 @@ lead_time = DOMESTIC_LEAD_TIME_WEEKS
 open_orders = []
 sim_rows = []
 
+part_value = float(part_row["PT_VAL"]) if pd.notna(part_row["PT_VAL"]) else 0.0
+
 if selected_segment in ["AX", "AY"]:
     reorder_point = float(part_row["reorder_point"])
     fixed_order_qty = float(part_row["eoq"])
@@ -343,29 +345,20 @@ if selected_segment in ["AX", "AY"]:
     for i, (_, row) in enumerate(sim_history.iterrows()):
         demand = float(row["weekly_demand"])
 
-        # Beginning inventory is carried over from previous week's ending inventory
         beginning_inventory = on_hand_inventory
 
-        # Receive incoming orders this week
         receipts = sum(qty for arrival_week, qty in open_orders if arrival_week == i)
-
-        # Remove received orders from pipeline
         open_orders = [
             (arrival_week, qty)
             for arrival_week, qty in open_orders
             if arrival_week != i
         ]
 
-        # Inventory available after receipts arrive
         available_inventory = beginning_inventory + receipts
-
-        # Demand occurs
         ending_inventory = available_inventory - demand
 
-        # Inventory position = ending on-hand inventory + open orders still in pipeline
         inventory_position = ending_inventory + sum(qty for _, qty in open_orders)
 
-        # Continuous review: trigger fixed EOQ order based on inventory position
         order_qty = 0.0
         if inventory_position <= reorder_point:
             order_qty = fixed_order_qty
@@ -373,7 +366,9 @@ if selected_segment in ["AX", "AY"]:
             open_orders.append((arrival_week, order_qty))
             inventory_position = ending_inventory + sum(qty for _, qty in open_orders)
 
-        # Carry ending inventory into next week
+        avg_inventory = (beginning_inventory + ending_inventory) / 2
+        weekly_holding_cost = avg_inventory * part_value * holding_cost_rate / 52
+
         on_hand_inventory = ending_inventory
 
         sim_rows.append({
@@ -386,6 +381,8 @@ if selected_segment in ["AX", "AY"]:
             "inventory_position": inventory_position,
             "order_qty": order_qty,
             "control_level": reorder_point,
+            "avg_inventory": avg_inventory,
+            "weekly_holding_cost": weekly_holding_cost,
         })
 
 else:
@@ -395,29 +392,20 @@ else:
     for i, (_, row) in enumerate(sim_history.iterrows()):
         demand = float(row["weekly_demand"])
 
-        # Beginning inventory is carried over from previous week's ending inventory
         beginning_inventory = on_hand_inventory
 
-        # Receive incoming orders this week
         receipts = sum(qty for arrival_week, qty in open_orders if arrival_week == i)
-
-        # Remove received orders from pipeline
         open_orders = [
             (arrival_week, qty)
             for arrival_week, qty in open_orders
             if arrival_week != i
         ]
 
-        # Inventory available after receipts arrive
         available_inventory = beginning_inventory + receipts
-
-        # Demand occurs
         ending_inventory = available_inventory - demand
 
-        # Inventory position = ending on-hand inventory + open orders still in pipeline
         inventory_position = ending_inventory + sum(qty for _, qty in open_orders)
 
-        # Periodic review: only review every R weeks
         order_qty = 0.0
         is_review_week = ((i + 1) % review_period == 0)
 
@@ -427,7 +415,9 @@ else:
             open_orders.append((arrival_week, order_qty))
             inventory_position = ending_inventory + sum(qty for _, qty in open_orders)
 
-        # Carry ending inventory into next week
+        avg_inventory = (beginning_inventory + ending_inventory) / 2
+        weekly_holding_cost = avg_inventory * part_value * holding_cost_rate / 52
+
         on_hand_inventory = ending_inventory
 
         sim_rows.append({
@@ -440,11 +430,40 @@ else:
             "inventory_position": inventory_position,
             "order_qty": order_qty,
             "control_level": target_level,
+            "avg_inventory": avg_inventory,
+            "weekly_holding_cost": weekly_holding_cost,
         })
 
 sim_df = pd.DataFrame(sim_rows)
 
-st.dataframe(sim_df, use_container_width=True)
+# Round simulation table for cleaner display
+display_sim_df = sim_df.copy()
+for col in [
+    "beginning_inventory",
+    "receipts",
+    "available_inventory",
+    "demand",
+    "ending_inventory",
+    "inventory_position",
+    "order_qty",
+    "control_level",
+    "avg_inventory",
+    "weekly_holding_cost",
+]:
+    display_sim_df[col] = display_sim_df[col].round(2)
+
+total_holding_cost = sim_df["weekly_holding_cost"].sum()
+avg_ending_inventory = sim_df["ending_inventory"].mean()
+total_ordered = sim_df["order_qty"].sum()
+num_orders = (sim_df["order_qty"] > 0).sum()
+
+col_h1, col_h2, col_h3, col_h4 = st.columns(4)
+col_h1.metric("Total Simulated Holding Cost", f"${total_holding_cost:,.2f}")
+col_h2.metric("Avg Ending Inventory", f"{avg_ending_inventory:,.2f}")
+col_h3.metric("Total Ordered Qty", f"{total_ordered:,.2f}")
+col_h4.metric("Number of Orders", f"{num_orders}")
+
+st.dataframe(display_sim_df, use_container_width=True)
 
 # -----------------------------
 # GRAPH 2: INVENTORY OVER TIME
@@ -484,12 +503,114 @@ plt.tight_layout()
 st.pyplot(fig3)
 
 # -----------------------------
+# GRAPH 4: HOLDING COST OVER TIME
+# -----------------------------
+st.subheader("Estimated Weekly Holding Cost Over Time")
+
+fig4, ax4 = plt.subplots()
+ax4.plot(sim_df["week_start"], sim_df["weekly_holding_cost"], marker="o")
+ax4.set_title(f"Estimated Weekly Holding Cost for {selected_part}")
+ax4.set_xlabel("Week")
+ax4.set_ylabel("Holding Cost ($)")
+plt.xticks(rotation=45)
+plt.tight_layout()
+st.pyplot(fig4)
+
+# -----------------------------
+# SECTION 5: SENSITIVITY ANALYSIS
+# -----------------------------
+st.header("5. Sensitivity Analysis")
+
+st.write(
+    "This section shows how estimated holding cost changes under different carrying cost assumptions. "
+    "For AX and AY items, it also shows how EOQ changes under different ordering cost assumptions."
+)
+
+# Holding cost sensitivity
+holding_rate_options = [0.08, 0.10, 0.13, 0.15, 0.20]
+
+holding_sensitivity_rows = []
+
+for rate in holding_rate_options:
+    temp_df = sim_df.copy()
+    temp_df["sensitivity_holding_cost"] = (
+        temp_df["avg_inventory"] * part_value * rate / 52
+    )
+
+    holding_sensitivity_rows.append({
+        "holding_cost_rate": rate,
+        "total_simulated_holding_cost": temp_df["sensitivity_holding_cost"].sum(),
+        "avg_weekly_holding_cost": temp_df["sensitivity_holding_cost"].mean(),
+    })
+
+holding_sensitivity_df = pd.DataFrame(holding_sensitivity_rows)
+holding_sensitivity_df["holding_cost_rate"] = holding_sensitivity_df["holding_cost_rate"].apply(lambda x: f"{x:.0%}")
+holding_sensitivity_df["total_simulated_holding_cost"] = holding_sensitivity_df["total_simulated_holding_cost"].round(2)
+holding_sensitivity_df["avg_weekly_holding_cost"] = holding_sensitivity_df["avg_weekly_holding_cost"].round(2)
+
+st.subheader("Holding Cost Sensitivity")
+st.dataframe(holding_sensitivity_df, use_container_width=True)
+
+fig5, ax5 = plt.subplots()
+ax5.bar(
+    holding_sensitivity_df["holding_cost_rate"],
+    holding_sensitivity_df["total_simulated_holding_cost"]
+)
+ax5.set_title(f"Holding Cost Sensitivity for {selected_part}")
+ax5.set_xlabel("Annual Holding Cost Rate")
+ax5.set_ylabel("Total Simulated Holding Cost ($)")
+plt.tight_layout()
+st.pyplot(fig5)
+
+# EOQ sensitivity only applies to AX and AY
+if selected_segment in ["AX", "AY"]:
+    st.subheader("EOQ Sensitivity")
+
+    ordering_cost_options = [50, 75, 100, 125, 150]
+
+    eoq_sensitivity_rows = []
+
+    annual_demand = float(part_row["avg_weekly_demand"]) * 52
+    holding_cost_per_unit = part_value * holding_cost_rate
+
+    for s in ordering_cost_options:
+        if holding_cost_per_unit > 0:
+            eoq_value = np.sqrt((2 * annual_demand * s) / holding_cost_per_unit)
+        else:
+            eoq_value = np.nan
+
+        eoq_sensitivity_rows.append({
+            "ordering_cost": s,
+            "eoq": eoq_value,
+        })
+
+    eoq_sensitivity_df = pd.DataFrame(eoq_sensitivity_rows)
+    eoq_sensitivity_df["eoq"] = eoq_sensitivity_df["eoq"].round(2)
+
+    st.dataframe(eoq_sensitivity_df, use_container_width=True)
+
+    fig6, ax6 = plt.subplots()
+    ax6.plot(eoq_sensitivity_df["ordering_cost"], eoq_sensitivity_df["eoq"], marker="o")
+    ax6.set_title(f"EOQ Sensitivity to Ordering Cost for {selected_part}")
+    ax6.set_xlabel("Ordering Cost ($)")
+    ax6.set_ylabel("EOQ")
+    plt.tight_layout()
+    st.pyplot(fig6)
+
+else:
+    st.info(
+        "EOQ sensitivity is only shown for AX and AY segments because those are the segments using the continuous review EOQ policy."
+    )
+
+# -----------------------------
 # VALIDATION NOTE
 # -----------------------------
 st.subheader("Validation Note")
 st.info(
     "This app currently simulates inventory behavior using historical weekly demand patterns "
     "and assumes all items are domestic with a fixed 3-week lead time. "
+    "Estimated holding cost is based on simulated average weekly inventory, part value, "
+    "and the selected annual holding cost rate. "
     "A full validation against actual historical inventory levels and actual historical replenishment "
     "records would require an additional dataset containing observed on-hand inventory and actual orders."
 )
